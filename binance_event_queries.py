@@ -8,7 +8,7 @@ Only first-page queries with {} are verified. Returning an untested second
 page, or silently treating an ignored pagination parameter as valid, could
 cause false negative order reconciliation: fail closed instead.
 """
-import re
+import threading
 from datetime import datetime, timezone
 
 import requests
@@ -46,6 +46,7 @@ class BinanceEventQueryProvider:
     def __init__(self, transport=None):
         self._owned_session = transport is None
         self._session = transport if transport is not None else self._new_session()
+        self._session_lock = threading.Lock()
 
     @staticmethod
     def _new_session():
@@ -112,20 +113,21 @@ class BinanceEventQueryProvider:
             "Cookie": "p20t=" + token["p20t"],
         }
         try:
-            response = self._session.post(
-                ORIGIN + path,
-                headers=headers,
-                json={},  # verified read-only query shape; NOT an order submission
-                timeout=TIMEOUT_SECONDS,
-                allow_redirects=False,
-            )
-            if response.status_code != 200:
-                raise ExchangeQueryError(
-                    "Binance order query returned an unexpected HTTP status"
+            with self._session_lock:
+                response = self._session.post(
+                    ORIGIN + path,
+                    headers=headers,
+                    json={},  # verified read-only query shape; NOT an order submission
+                    timeout=TIMEOUT_SECONDS,
+                    allow_redirects=False,
                 )
-            if response.headers.get("x-amzn-waf-action"):
-                raise ExchangeQueryError("Binance order query encountered a security challenge")
-            payload = response.json()
+                if response.status_code != 200:
+                    raise ExchangeQueryError(
+                        "Binance order query returned an unexpected HTTP status"
+                    )
+                if response.headers.get("x-amzn-waf-action"):
+                    raise ExchangeQueryError("Binance order query encountered a security challenge")
+                payload = response.json()
         except (requests.RequestException, ValueError) as exc:
             # Do not propagate exception text; it can contain URL or secret data.
             if isinstance(exc, ExchangeQueryError):
@@ -162,7 +164,8 @@ class BinanceEventQueryProvider:
             "source": "binance_web_private_undocumented",
             "kind": kind,
             "exchange_response_verified": True,  # verified read response only
-            "order_settlement_verified": kind == "closed",  # status as reported by Binance
+            "reported_closed_by_exchange": kind == "closed",
+            "independently_settlement_verified": False,
             "page": 1,
             "returned_count": len(orders),
             "total": total,
@@ -195,4 +198,5 @@ class BinanceEventQueryProvider:
 
     def close(self):
         if self._owned_session:
-            self._session.close()
+            with self._session_lock:
+                self._session.close()
