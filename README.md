@@ -4,7 +4,7 @@
 
 ## Linux 部署（必须是非 root 用户）
 
-安装隔离 Python 环境，执行 `pip install -r requirements.txt`、`python -m playwright install chromium`，随后运行 `python -m unittest discover -s tests -v`。系统若没有 venv 或 Chromium 所需系统库，应由管理员另行安装。
+安装隔离 Python 环境，优先执行 `pip install -r requirements.lock`（完全固定的实测依赖版本；`requirements.txt` 是直接依赖清单）、`python -m playwright install chromium`，随后运行 `python -m unittest discover -s tests -v`。系统若没有 venv 或 Chromium 所需系统库，应由管理员另行安装。
 
 不再依赖 Pillow：登录 QR 只输出到交互式终端，不再生成 qrcode.jpg；三个直接依赖已固定版本。
 
@@ -27,3 +27,5 @@
 `python -m unittest discover -s tests -v` 使用 HTTP Mock，不访问交易所。不要提交 token.json、浏览器 profile、二维码、状态目录或日志。使用者需自行评估币安相关服务条款及资金风险。
 
 上游项目： https://github.com/thuhollow2/Binance-Event-Contract-Interface 。本 Fork 保留上游许可证。
+
+远程服务器上若已配置专用系统账户，管理员可用 `runuser -u binanceevt -- /home/binanceevt/.venvs/binance-event-contract/bin/python /home/binanceevt/Binance-Event-Contract-Interface/main.py` 在交互式 SSH 终端执行登录。登录时需要分配 TTY；请勿将 QR 或凭证写入终端会话日志。
