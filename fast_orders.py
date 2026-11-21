@@ -118,6 +118,7 @@ class SQLiteJournal:
             raise RuntimeError("Refusing symlinked order database")
         connection = sqlite3.connect(str(self.path), timeout=0.15, isolation_level=None)
         connection.execute("PRAGMA busy_timeout=150")
+        connection.execute("PRAGMA synchronous=FULL")
         return connection
 
     def _initialize(self):
@@ -280,6 +281,14 @@ class FastOrderDispatcher:
             order.orderAmount, order.timeIncrements, order.symbolName,
             order.payoutRatio, order.direction, order.intent_id,
         )
+        # A duplicate lookup must work even after the original signal expired
+        # or while the queue is full; it NEVER initiates another HTTP request.
+        existing = self.journal.get(order.intent_id)
+        if existing is not None:
+            if existing["order"] != fields:
+                raise ConflictingIntent("Intent ID reused with different order parameters")
+            existing["already_exists"] = True
+            return existing
         created_ms, deadline_ms = _validated_timing(signal_time_ms, max_age_ms)
         if self.queue.full():
             raise DispatcherUnavailable("Bounded order queue is full; signal not accepted")
@@ -381,3 +390,10 @@ class FastOrderDispatcher:
             fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
             os.close(self._lock_fd)
             self._lock_fd = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
