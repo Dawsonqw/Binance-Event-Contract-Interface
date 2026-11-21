@@ -1,60 +1,29 @@
-# 接口逆向
+# Binance 事件合约接口研究（安全加固分支）
 
-币安事件合约下单接口逆向，利用 API 下单，可实现批量化、自动化交易；项目仅供学习交流使用，请勿用于非法用途，否则后果自负。
+> **非官方、未经实盘验证。** 内部接口可能随时变更；本项目不能保证真实下单成功，也不提供绕过币安风控或身份验证的方法。
 
-币安最多可同时登录 1 个 App 端和 1 个 Web 端，可利用登录后的凭证进行接口调用。
+## Linux 部署（必须是非 root 用户）
 
-- 对于 App 端，cURL bash 接口为
+安装隔离 Python 环境，执行 `pip install -r requirements.txt`、`python -m playwright install chromium`，随后运行 `python -m unittest discover -s tests -v`。系统若没有 venv 或 Chromium 所需系统库，应由管理员另行安装。
 
-```shell
-curl 'https://www.binance.com/bapi/futures/v2/private/future/event-contract/place-order' \
-  -H 'content-type: application/json' \
-  -H 'clienttype: android' \
-  -H 'x-token: app.242414123.80946DCA4C235E37B129E4D387E11B51' \
-  -X POST \
-  --data-binary '{"orderAmount":"5","timeIncrements":"TEN_MINUTE","symbolName":"BTCUSDT","payoutRatio":"0.80","direction":"LONG"}'
-```
+不再依赖 Pillow：登录 QR 只输出到交互式终端，不再生成 qrcode.jpg；三个直接依赖已固定版本。
 
-- 对于 Web 端，cURL bash 接口为
+## 账户登录
 
-```shell
-curl 'https://www.binance.com/bapi/futures/v2/private/future/event-contract/place-order' \
-  -H 'content-type: application/json' \
-  -H 'clienttype: web' \
-  -H 'csrftoken: 93126d6c61eca80cc05349E5d1a8bb4a' \
-  -b 'p20t=web.242414123.70846DCA4C235E37B129E4D387E11D41' \
-  -X POST \
-  --data-binary '{"orderAmount":"5","timeIncrements":"TEN_MINUTE","symbolName":"BTCUSDT","payoutRatio":"0.80","direction":"LONG"}'
-```
+以独立的非 root 用户，在交互式 TTY 运行 `python main.py`，使用本人的 Binance App 扫码。程序不会输出 csrftoken 或 p20t。
 
-App 端的 `x-token` 可在抓包工具中获取，Web 端的 `p20t` 和 `csrftoken` 可在浏览器的开发者工具中获取；`x-token` 与 `p20t` 由 `登录方式.ID.Token` 的形式组成，`csrftoken` 为 www.binance.com 的 CSRF token；App 端凭证有效期未知，Web 端凭证最大有效期为 5 天。
+登录凭证保存在 `~/.local/state/binance-event-contract/token.json` (0600)；Chromium profile 位于私有状态目录 (0700)。通过 `BINANCE_EVENT_STATE_DIR` 可更换状态目录，请确保其位于可信磁盘，且不要备份或上传凭证。
 
-本项目使用 Python 实现，模拟 Web 端登录以获取 Web 端凭证并下单，用户需使用币安 App 扫码登录。
+## 真实下单默认关闭
 
----
-# 安装依赖
+只有调用 `safe_orders.place_order_web()`，同时设置环境变量 `BINANCE_EVENT_LIVE_TRADING=I_ACCEPT_REAL_MONEY_RISK`，才能尝试下单。默认单笔上限 5 USDT；通过 `BINANCE_EVENT_MAX_ORDER_USDT` 配置。每次必须传入稳定且唯一的 `intent_id` 关键字参数。
 
-在项目根目录下，执行
+下单前记录独占的持久意图文件，用来拒绝同一个 ID 再次发送；使用 5 秒连接、12 秒响应超时，**绝不自动重试**。未返回明确成功标志和订单号时抛出 `OrderNotConfirmed`，必须人工去币安 App 查证，切勿超时后盲目重发。即便得到订单号，也应通过 App 对账。
 
-```shell
-pip install -r requirements.txt 
-```
+**限制**：本地意图记录只保护同一状态卷、相同 `intent_id`，不是交易所服务端幂等保障；没有可靠的查询及对账 API。不同机器、不同 ID 或恢复丢失的状态目录仍可能重复交易。默认拒绝 root 登录和 root 下单，不提供 24 小时无人值守的稳定性承诺。
 
-为 `playwright` 安装浏览器驱动，执行
+## 离线测试与安全
 
-```shell
-playwright install chromium
-playwright install-deps
-```
+`python -m unittest discover -s tests -v` 使用 HTTP Mock，不访问交易所。不要提交 token.json、浏览器 profile、二维码、状态目录或日志。使用者需自行评估币安相关服务条款及资金风险。
 
----
-# 运行
-
-在项目根目录下，执行
-
-```shell
-python main.py
-```
-
-
-即可运行脚本，脚本会在当前目录下生成 `token.json` 文件保存 Web 端凭证信息（`csrftoken`、`p20t`、`expirationTimestamp`）；用户可根据需要调用 `place_order_web()` 函数进行下单操作。
+上游项目： https://github.com/thuhollow2/Binance-Event-Contract-Interface 。本 Fork 保留上游许可证。
