@@ -1,6 +1,6 @@
 # 自动化框架接入：交易接口 / 查询接口 v1
 
-> **风险声明**：币安事件合约目前没有已验证的官方 API。下列交易端只是封装原 Fork 的非官方下单方式，尚未实际验证成交。查询端默认只读取本服务器的提交记录，不代表币安订单、持仓或结算状态。
+> **风险声明**：币安事件合约没有已验证的官方交易 API。下单仍使用未公开接口，尚未验证真实成交。查询部分已验证 Binance Web 域名上的两个非官方、只读订单列表接口（仅第一页）；本地提交记录与币安返回的订单列表必须严格区分，不能据此断言完整对账。
 
 ## 架构
 
@@ -11,7 +11,9 @@
 event_gateway.EventContractGateway
    |-- .trading.submit_order(OrderRequest) -> safe_orders.place_order_web
    |-- .queries.get_session() -> session_lifecycle
-   |-- .queries.get_order() / .list_orders() -> order_queries（本地记录）
+   |-- .queries.get_order() / .list_orders() -> SQLite（本地提交记录）
+   |-- .queries.list_ongoing_orders() -> Binance Web 只读未结算列表
+   |-- .queries.list_closed_orders() -> Binance Web 只读已结算列表
    '-- .queries.get_quote() / .get_exchange_order() / .get_settlement()
              未验证：抛出 RemoteQueryUnavailable / HTTP 501
 ```
@@ -40,11 +42,23 @@ request = OrderRequest(
 # gateway.trading.submit_order(request)  # 默认禁用，切勿随意取消注释
 ```
 
-## 未来接入币安真实查询后端
+## Binance 真实订单列表：已验证只读实现
 
-SDK 现支持通过 `EventContractGateway(query_provider=MyVerifiedProvider())` 注入自定义查询实现。Provider 需实现 `get_order(order_id)`、`get_quote(symbol, time_increments)`、`get_settlement(order_id)`。
+默认 `EventContractGateway()` 已注入 `BinanceEventQueryProvider`，支持：
 
-**目前没有提供可验证的 Binance 事件合约查询 Provider**，默认会明确抛出 `RemoteQueryUnavailable`，HTTP 端返回 501。将来找到合法、稳定且经过验证的数据接口后，只需替换 Provider，不必修改策略调用方的接口定义。插入 Provider 之前必须核实查询结果的数据来源、认证方式和实时性。
+- Python：`gateway.queries.list_ongoing_orders(page=1)`、`gateway.queries.list_closed_orders(page=1)`。
+- HTTP：`GET /v1/exchange/orders/ongoing?page=1`、`GET /v1/exchange/orders/closed?page=1`。
+- 内部固定访问 `https://www.binance.com`：未结算查询 `/bapi/futures/v2/private/future/event-contract/ongoing-order-list`，已结算查询 `/bapi/futures/v1/private/future/event-contract/closed-order-list`。两者使用 **HTTP POST + 空 JSON `{}`** 执行只读列表查询，绝不调用 `place-order`。
+- 认证凭证仅在服务器端从私有目录读取，禁止日志打印；不将 Cookie 传给客户端或任何其他域名。
+- 仅接受 HTTP 200、`success: true`、业务码 `000000`；拒绝重定向/WAF、超时或畸形 JSON。上游异常返回 HTTP 502，登录凭证失效/过期返回 HTTP 409。
+- 兼容两种不同响应结构：未结算 `data.result.rows / total`；已结算 `data.rows / total`。只保留已观察到的订单字段，包括 `id`、`symbolName`、`direction`、`openPrice`、`closePrice`、`orderAmount`、`payoutRatio`、`settlementAmount` 等。
+- 输出 `kind`、`source`、`page`、`returned_count`、`total`、`has_more`、`pagination_supported`、`fetched_at_utc` 和 `items`。
+
+**分页暂未验证。** 截至 2026-11-21，已验证的默认已结算订单查询返回 `total=326`、`returned_count=10`，但没有确认 Binance 内部分页参数；因此只支持 `page=1`。请求 `page>1` 会返回 HTTP 501，不能将第一页 10 条误认为全部历史。该账户的这两个列表查询已在远程服务器以只读方式复测成功。
+
+**仍不支持** 任意订单 ID 精确检索、实时赔率、独立结算查询和账户资金流水自动对账。即便订单来自“已结算列表”，也不等于本系统已独立完成资金流水核对。
+
+SDK 仍支持 `EventContractGateway(query_provider=MyVerifiedProvider())` 注入将来验证的替代 Provider；需要根据实际能力准确实现 `capabilities()`，不能伪造已支持的接口。
 
 **Python SDK 兼容性提醒**：现在 `TradingInterface.submit_order()` 也是**默认非阻塞**的，与 `submit_order_async()` 等价；需要显式传入 `dispatcher=FastOrderDispatcher()`。旧同步路径仅保留为 `submit_order_sync_legacy()`，不应在实时策略中调用。接口行为变化会影响之前假设“调用返回即交易成功”的代码，迁移时必须调整为异步状态轮询。
 
@@ -91,7 +105,7 @@ SDK 现支持通过 `EventContractGateway(query_provider=MyVerifiedProvider())` 
 
 所有记录都带有 `exchange_verified:false`、`final_settlement_verified:false`、`safe_to_auto_retry:false`。这三者不会因为拿到订单号而自动置真。
 
-`GET /v1/orders` 使用 SQLite 索引查询（默认 50，最多 100）；原来文件格式的历史订单仍可按 `intent_id` 单独读取，但不再出现在新分页列表里。真实交易所订单及赔率、结算接口仍为 HTTP 501。
+`GET /v1/orders` 使用 SQLite 索引查询**本地提交记录**（默认 50，最多 100）；旧文件记录仍可按 `intent_id` 单独读取。交易所订单列表则使用单独的 `/v1/exchange/orders/ongoing` 与 `/v1/exchange/orders/closed`，并且**目前仅支持第一页**。实时赔率、任意 ID 订单详情和独立结算接口仍为 HTTP 501。
 
 ## 本机 HTTP API（标准库，无额外 Web 框架依赖）
 
@@ -157,3 +171,17 @@ curl -sS -H "Authorization: Bearer $BINANCE_EVENT_API_TOKEN" \
 - 本地意图锁不保证跨服务器级别去重，不代表交易所级幂等。
 - 目前只有“提交/接口响应”的本地记录，没有最终订单、持仓、结算及资金回报核对。正式自动交易前必须补齐。
 - 原型 HTTP 接口仅供内网可信系统、SSH 隧道和受控用户使用；不面向公网，也不支持多租户授权。
+
+## 对外接口速查（区分数据来源）
+
+| 路由 | 状态 | 数据来源 |
+|---|---|---|
+| `GET /v1/orders` | 已实现 | 本地 SQLite |
+| `GET /v1/orders/{intent_id}` | 已实现 | 本地 SQLite/文件 |
+| `GET /v1/exchange/orders/ongoing?page=1` | 已实测，只读 | Binance Web 未结算订单列表第一页 |
+| `GET /v1/exchange/orders/closed?page=1` | 已实测，只读 | Binance Web 已结算订单列表第一页 |
+| `GET /v1/exchange/orders/{order_id}` | 501 | 精确远端订单号查询未验证 |
+| `GET /v1/settlements/{order_id}` | 501 | 独立远端结算查询未验证 |
+| `GET /v1/quotes` | 501 | 实时赔率未验证 |
+
+所有 HTTP 路由（包括只读查询）均需提供私有网关 Bearer Token；网关只监听 `127.0.0.1`。**实盘下单开关仍默认关闭。**
