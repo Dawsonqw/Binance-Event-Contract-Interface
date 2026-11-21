@@ -172,6 +172,27 @@ class FastOrdersTests(unittest.TestCase):
             self.assertEqual(len(dispatch.journal.list(limit=100)), 100)
             self.assertIsNotNone(dispatch.journal.get("daily-0119"))
 
+    def test_worker_exception_does_not_stop_future_orders(self):
+        with self.dispatcher() as dispatch:
+            original = dispatch._execute_one
+            calls = [0]
+            def temporary_failure(*args):
+                calls[0] += 1
+                if calls[0] == 1:
+                    raise RuntimeError("injected worker failure before dispatch")
+                return original(*args)
+            dispatch._execute_one = temporary_failure
+            first = OrderRequest.from_dict(PARAMS)
+            second = OrderRequest.from_dict({**PARAMS, "intent_id": "after-recovery"})
+            dispatch.submit(first)
+            failed = self.wait_final(dispatch, first.intent_id)
+            self.assertEqual(failed["status"], "REJECTED_INTERNAL_BEFORE_SEND")
+            dispatch.submit(second)
+            finished = self.wait_final(dispatch, second.intent_id)
+            self.assertEqual(finished["status"], "ACKNOWLEDGED_NOT_SETTLEMENT_VERIFIED")
+            self.assertEqual(self.transport.post.call_count, 1)
+            self.assertTrue(dispatch.health()["worker_alive"])
+
     def test_disabled_trade_rejected_without_journal(self):
         with self.dispatcher() as dispatch:
             os.environ["BINANCE_EVENT_LIVE_TRADING"] = ""
