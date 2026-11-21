@@ -1,8 +1,9 @@
-"""Read-only query adapter.
+"""Local audit-log query adapter and unsupported remote query placeholders.
 
-Queries in this module are LOCAL audit records, not Binance order queries.
-The upstream project has not established a verified event-contract order,
-quote, position or settlement query endpoint.
+This module reads only LOCAL submission records. Separately, the
+binance_event_queries.BinanceEventQueryProvider implements the two verified
+read-only Binance order LIST endpoints. Arbitrary order-ID lookup, live payout
+quotes and independent settlement lookup are NOT verified.
 """
 import hashlib
 import json

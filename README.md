@@ -29,7 +29,9 @@
 - Python：`EventContractGateway().trading.submit_order(OrderRequest(...))` 和 `EventContractGateway().queries.get_order(intent_id)`
 - HTTP：`POST /v1/orders`、`GET /v1/orders/{intent_id}`、`GET /v1/orders`、`GET /v1/session`、`GET /v1/capabilities`
 - HTTP 服务默认只绑定 `127.0.0.1:18765`，要求单独的 Bearer Token；其他机器通过 SSH 隧道接入。
-- **查询到的只是本地提交审计记录**：币安实时订单、赔率和结算接口仍未验证，明确返回 HTTP 501，不会伪造远端查询数据。
+- **订单查询已经分为两种数据来源**：`GET /v1/orders` 是本地提交记录；`GET /v1/exchange/orders/ongoing` 和 `GET /v1/exchange/orders/closed` 使用已验证的 Binance Web 只读查询路径获取真实账户订单列表。它们内部都是 `POST` 空 JSON **查询**，不会下单。
+- 当前只能确认两个远端接口的**第一页**查询（默认 10 条）。响应中的 `total` 可能比 `items` 长度大；由于 Binance 私有接口分页参数尚未验证，明确拒绝 `page>1`，不会把重复第一页冒充后续记录。
+- 按币安订单号查任意历史订单、实时赔付赔率和独立结算接口仍未验证，返回 HTTP 501。已结算列表中的 `closePrice` / `settlementAmount` 只是币安报告的数据，并不代表独立资金流水对账完成。
 
 ## 高频/低延迟信号：异步持久化下单
 
@@ -48,7 +50,7 @@
 
 下单前记录独占的持久意图文件，用来拒绝同一个 ID 再次发送；使用 5 秒连接、12 秒响应超时，**绝不自动重试**。未返回明确成功标志和订单号时抛出 `OrderNotConfirmed`，必须人工去币安 App 查证，切勿超时后盲目重发。即便得到订单号，也应通过 App 对账。
 
-**限制**：本地意图记录只保护同一状态卷、相同 `intent_id`，不是交易所服务端幂等保障；没有可靠的查询及对账 API。不同机器、不同 ID 或恢复丢失的状态目录仍可能重复交易。默认拒绝 root 登录和 root 下单，不提供 24 小时无人值守的稳定性承诺。
+**限制**：本地意图记录只保护同一状态卷、相同 `intent_id`，不是交易所服务端幂等保障；当前虽已验证远端订单列表第一页，但没有经过验证的完整历史分页、订单详情或资金流水自动对账。不同机器、不同 ID 或恢复丢失的状态目录仍可能重复交易。默认拒绝 root 登录和 root 下单，不提供 24 小时无人值守的稳定性承诺。
 
 ## 离线测试与安全
 
