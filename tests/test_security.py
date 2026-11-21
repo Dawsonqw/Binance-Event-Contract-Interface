@@ -57,13 +57,26 @@ class SecurityTests(unittest.TestCase):
 
     def test_reject_token_symlink(self):
         state = Path(os.environ["BINANCE_EVENT_STATE_DIR"])
-        state.mkdir(mode=0o700)
+        state.mkdir(mode=0o700, exist_ok=True)
+        (state / "token.json").unlink()
         outside = Path(self.temp.name) / "outside.json"
         outside.write_text("unchanged", encoding="utf-8")
         (state / "token.json").symlink_to(outside)
         with self.assertRaises(RuntimeError):
             save_token({"csrftoken": "a", "p20t": "b"})
         self.assertEqual(outside.read_text(encoding="utf-8"), "unchanged")
+
+    def test_expired_auth_blocks_order_before_intent(self):
+        save_token({
+            "csrftoken": "test-csrf", "p20t": "test-cookie",
+            "expirationTimestamp": int(time.time()) - 5,
+        })
+        with patch.object(safe_orders.requests, "post") as post:
+            from session_lifecycle import AuthenticationRequired
+            with self.assertRaises(AuthenticationRequired):
+                safe_orders.place_order_web(**self.params)
+            post.assert_not_called()
+        self.assertFalse((Path(os.environ["BINANCE_EVENT_STATE_DIR"]) / "intents").exists())
 
     def test_live_orders_disabled_by_default(self):
         with patch.dict(os.environ, {"BINANCE_EVENT_LIVE_TRADING": ""}), \
