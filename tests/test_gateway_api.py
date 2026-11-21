@@ -63,6 +63,21 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(RemoteQueryUnavailable):
             self.gateway.queries.get_exchange_order("123")
 
+    def test_pluggable_remote_query_provider(self):
+        class DemoProvider:
+            def get_order(self, order_id):
+                return {"provider": "fixture", "order_id": order_id}
+            def get_quote(self, symbol, time_increments):
+                return {"provider": "fixture", "symbol": symbol}
+            def get_settlement(self, order_id):
+                return {"provider": "fixture", "settled": False}
+
+        configured = EventContractGateway(query_provider=DemoProvider())
+        self.assertTrue(configured.queries.capabilities()["exchange_order_query"])
+        self.assertEqual(configured.queries.get_exchange_order("id-1")["order_id"], "id-1")
+        self.assertEqual(configured.queries.get_quote("BTCUSDT", "TEN_MINUTE")["symbol"], "BTCUSDT")
+        self.assertFalse(configured.queries.get_settlement("id-1")["settled"])
+
     def test_request_schema(self):
         req = OrderRequest.from_dict(ORDER)
         self.assertEqual(req.intent_id, ORDER["intent_id"])
