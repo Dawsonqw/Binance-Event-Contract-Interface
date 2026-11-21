@@ -148,6 +148,8 @@ def place_order_web(csrftoken, p20t, orderAmount, timeIncrements, symbolName,
         # No automatic retries: a timeout might still have created an order.
         response = requests.post(ORDER_URL, headers=headers, json=fields, timeout=(5, 12), allow_redirects=False)
         response.raise_for_status()
+        if not (200 <= response.status_code < 300):
+            raise OrderNotConfirmed("Unexpected HTTP redirect or response; reconcile in Binance App")
         payload = response.json()
     except (requests.RequestException, ValueError):
         raise OrderNotConfirmed(
