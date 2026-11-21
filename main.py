@@ -1,7 +1,7 @@
 import os
 import re
 import sys
-from pathlib import Path
+import time
 import qrcode
 import shutil
 from http.cookies import SimpleCookie
@@ -9,7 +9,6 @@ from email.utils import parsedate_to_datetime
 from playwright.sync_api import sync_playwright
 
 from secure_storage import load_token, save_token, state_dir
-from safe_orders import place_order_web
 
 WIN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 
@@ -97,11 +96,14 @@ def print_qr(data):
     for _ in range(margin * scale):
         print(white * (w + margin * 2))
 
-def get_token(reset=False, headless=True):
+def get_token(reset=False, headless=True, timeout_seconds=300):
     if os.geteuid() == 0:
         raise PermissionError("Do not run the Binance login browser as root")
     if not sys.stdout.isatty():
         raise RuntimeError("Login requires an interactive terminal to display the one-time QR code")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    deadline = time.monotonic() + timeout_seconds
     csrftoken = ""
     p20t = ""
     expirationTimestamp = -1
@@ -110,7 +112,7 @@ def get_token(reset=False, headless=True):
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         apply_windows_ua(ctx, page)
 
-        qr_results = []
+        qr_results = set()
 
         def update_p20t_from_context():
             try:
@@ -120,6 +122,11 @@ def get_token(reset=False, headless=True):
                 if not token: return
                 nonlocal p20t
                 p20t = token
+                nonlocal expirationTimestamp
+                expires = c.get("expires")
+                # Playwright reports -1 for session cookies. Never invent a lifetime.
+                if isinstance(expires, (int, float)) and expires > time.time():
+                    expirationTimestamp = int(expires)
             except:
                 pass
 
@@ -144,7 +151,7 @@ def get_token(reset=False, headless=True):
                     if not data.get("success"): return
                     code = data["data"]["qrCode"]
                     if code not in qr_results:
-                        qr_results.append(code)
+                        qr_results.add(code)
                         print("请使用 Binance App 扫描以下二维码登录")
                         print_qr(code)
                 elif "https://accounts.binance.com/bapi/accounts/v2/private/authcenter/setTrustDevice" in url:
@@ -167,57 +174,70 @@ def get_token(reset=False, headless=True):
         ctx.on("request", on_request)
         ctx.on("requestfinished", on_request_finished)
 
-        page.goto("https://accounts.binance.com/zh-CN/login?loginChannel=&return_to=", wait_until="domcontentloaded")
-
-        while True:
-            page.wait_for_timeout(1500)
-
-            if csrftoken and p20t:
-                token_dict = {"csrftoken": csrftoken, "p20t": p20t, "expirationTimestamp": expirationTimestamp}
-                if expirationTimestamp == -1:
-                    try:
-                        old = load_token()
-                        if old.get("p20t") == p20t and old.get("csrftoken") == csrftoken:
-                            token_dict["expirationTimestamp"] = old.get("expirationTimestamp", -1)
-                    except FileNotFoundError:
-                        pass
-                save_token(token_dict)
-                print("登录凭证已安全保存到私有状态目录；不会打印 Token。")
-                ctx.close()
-                break
-
-            try:
-                if "accounts.binance.com" in page.url:
-                    if page.get_by_role("button", name=re.compile("Understand")).count() > 0:
-                        page.get_by_role("button", name=re.compile("Understand")).first.click(timeout=1200, force=True)
-
-                    if page.get_by_role("button", name=re.compile("知道了")).count() > 0:
-                        page.get_by_role("button", name=re.compile("知道了")).first.click(timeout=1200, force=True)
-
-                    if page.get_by_role("button", name=re.compile(r"^好的$")).count() > 0:
-                        page.get_by_role("button", name=re.compile(r"^好的$")).first.click(timeout=1200, force=True)
-
-                    if page.get_by_role("button", name=re.compile("已知晓")).count() > 0:
-                        page.get_by_role("button", name=re.compile("已知晓")).first.click(timeout=1200, force=True)
-
-                    if page.get_by_role("button", name=re.compile(r"^二维码登录$")).count() > 0 and page.get_by_text(re.compile("扫码登录")).count() == 0:
-                        page.get_by_role("button", name=re.compile(r"^二维码登录$")).first.click(timeout=1200, force=True)
-
-                    if page.get_by_role("button", name=re.compile(r"^刷新二维码$")).count() > 0:
-                        page.get_by_role("button", name=re.compile(r"^刷新二维码$")).first.click(timeout=1200, force=True)
-
-                    if page.get_by_role("button", name=re.compile(r"^登录失败$")).count() > 0:
-                        page.get_by_role("button", name=re.compile(r"^登录失败$")).first.click(timeout=1200, force=True)
-
-                    if page.get_by_role("button", name=re.compile(r"^登录$")).count() > 0 and page.get_by_text(re.compile(r"^邮箱/手机号码$")).count() > 0 and page.get_by_text(re.compile(r"^用手机相机扫描$")).count() == 0:
-                        page.get_by_role("button", name=re.compile(r"^登录$")).first.click(timeout=1200, force=True)
-
-                    if page.get_by_role("button", name=re.compile(r"^是$")).count() > 0:
-                        page.get_by_role("button", name=re.compile(r"^是$")).first.click(timeout=1200, force=True)
-                else:
-                    update_p20t_from_context()
-            except:
-                pass
+        try:
+            page.goto("https://accounts.binance.com/zh-CN/login?loginChannel=&return_to=", wait_until="domcontentloaded", timeout=30000)
+    
+            while True:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "Binance login timed out. No new session confirmed; try interactive QR login again."
+                    )
+                page.wait_for_timeout(1500)
+    
+                if csrftoken and p20t:
+                    token_dict = {"csrftoken": csrftoken, "p20t": p20t, "expirationTimestamp": expirationTimestamp}
+                    if expirationTimestamp == -1:
+                        try:
+                            old = load_token()
+                            if old.get("p20t") == p20t and old.get("csrftoken") == csrftoken:
+                                token_dict["expirationTimestamp"] = old.get("expirationTimestamp", -1)
+                        except FileNotFoundError:
+                            pass
+                    save_token(token_dict)
+                    print("登录凭证已安全保存到私有状态目录；不会打印 Token。")
+                    return
+    
+                try:
+                    if "accounts.binance.com" in page.url:
+                        if page.get_by_role("button", name=re.compile("Understand")).count() > 0:
+                            page.get_by_role("button", name=re.compile("Understand")).first.click(timeout=1200, force=True)
+    
+                        if page.get_by_role("button", name=re.compile("知道了")).count() > 0:
+                            page.get_by_role("button", name=re.compile("知道了")).first.click(timeout=1200, force=True)
+    
+                        if page.get_by_role("button", name=re.compile(r"^好的$")).count() > 0:
+                            page.get_by_role("button", name=re.compile(r"^好的$")).first.click(timeout=1200, force=True)
+    
+                        if page.get_by_role("button", name=re.compile("已知晓")).count() > 0:
+                            page.get_by_role("button", name=re.compile("已知晓")).first.click(timeout=1200, force=True)
+    
+                        if page.get_by_role("button", name=re.compile(r"^二维码登录$")).count() > 0 and page.get_by_text(re.compile("扫码登录")).count() == 0:
+                            page.get_by_role("button", name=re.compile(r"^二维码登录$")).first.click(timeout=1200, force=True)
+    
+                        if page.get_by_role("button", name=re.compile(r"^刷新二维码$")).count() > 0:
+                            page.get_by_role("button", name=re.compile(r"^刷新二维码$")).first.click(timeout=1200, force=True)
+    
+                        if page.get_by_role("button", name=re.compile(r"^登录失败$")).count() > 0:
+                            page.get_by_role("button", name=re.compile(r"^登录失败$")).first.click(timeout=1200, force=True)
+    
+                        if page.get_by_role("button", name=re.compile(r"^登录$")).count() > 0 and page.get_by_text(re.compile(r"^邮箱/手机号码$")).count() > 0 and page.get_by_text(re.compile(r"^用手机相机扫描$")).count() == 0:
+                            page.get_by_role("button", name=re.compile(r"^登录$")).first.click(timeout=1200, force=True)
+    
+                        if page.get_by_role("button", name=re.compile(r"^是$")).count() > 0:
+                            page.get_by_role("button", name=re.compile(r"^是$")).first.click(timeout=1200, force=True)
+                    else:
+                        update_p20t_from_context()
+                except:
+                    pass
+        finally:
+            ctx.close()
 
 if __name__ == "__main__":
-    get_token(reset=False, headless=True)
+    import argparse
+    parser = argparse.ArgumentParser(description="Interactive Binance web login (never submits orders)")
+    parser.add_argument("--timeout", type=int, default=300, help="Login timeout in seconds")
+    parser.add_argument("--reset-browser-profile", action="store_true",
+                        help="Discard existing browser session and require a new QR approval")
+    args = parser.parse_args()
+    get_token(reset=args.reset_browser_profile, headless=True, timeout_seconds=args.timeout)
+

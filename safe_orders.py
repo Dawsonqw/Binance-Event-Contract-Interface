@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 import requests
 
 from secure_storage import state_dir
+from session_lifecycle import require_fresh_session
 
 ORDER_URL = "https://www.binance.com/bapi/futures/v2/private/future/event-contract/place-order"
 LIVE_OPT_IN = "I_ACCEPT_REAL_MONEY_RISK"
@@ -136,6 +137,9 @@ def place_order_web(csrftoken, p20t, orderAmount, timeIncrements, symbolName,
         raise PermissionError("Live trading disabled; explicit opt-in required")
     if not isinstance(csrftoken, str) or not csrftoken or not isinstance(p20t, str) or not p20t:
         raise ValueError("Missing Binance session credentials")
+    # Reject unknown / expiring local credentials BEFORE writing a permanent intent.
+    # This check does not prove exchange-side acceptance.
+    require_fresh_session(csrftoken, p20t)
     fields = _validate(orderAmount, timeIncrements, symbolName, payoutRatio, direction, intent_id)
     intent_path = _record_intent(intent_id, fields)
     headers = {

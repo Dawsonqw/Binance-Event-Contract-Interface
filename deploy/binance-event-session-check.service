@@ -1,0 +1,18 @@
+[Unit]
+Description=Binance Event Contract local session expiry check
+Documentation=https://github.com/Dawsonqw/Binance-Event-Contract-Interface
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=binanceevt
+Group=binanceevt
+WorkingDirectory=/home/binanceevt/Binance-Event-Contract-Interface
+ExecStart=/home/binanceevt/.venvs/binance-event-contract/bin/python -m session_lifecycle status
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+TimeoutStartSec=15s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=binance-event-session
