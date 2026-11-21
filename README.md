@@ -22,6 +22,15 @@
 
 完整方案见 [docs/session-renewal.md](docs/session-renewal.md)。可选的 systemd timer 模板位于 `deploy/`，默认**没有启用**，且只监控本地时间戳，不会续期、不连接交易所或发送通知。
 
+## 给其他框架接入的交易 / 查询 API
+
+已抽离出稳定的 [Python SDK 和本地 HTTP API](docs/integration-api.md)：
+
+- Python：`EventContractGateway().trading.submit_order(OrderRequest(...))` 和 `EventContractGateway().queries.get_order(intent_id)`
+- HTTP：`POST /v1/orders`、`GET /v1/orders/{intent_id}`、`GET /v1/orders`、`GET /v1/session`、`GET /v1/capabilities`
+- HTTP 服务默认只绑定 `127.0.0.1:18765`，要求单独的 Bearer Token；其他机器通过 SSH 隧道接入。
+- **查询到的只是本地提交审计记录**：币安实时订单、赔率和结算接口仍未验证，明确返回 HTTP 501，不会伪造远端查询数据。
+
 ## 真实下单默认关闭
 
 只有调用 `safe_orders.place_order_web()`，同时设置环境变量 `BINANCE_EVENT_LIVE_TRADING=I_ACCEPT_REAL_MONEY_RISK`，才能尝试下单。默认单笔上限 5 USDT；通过 `BINANCE_EVENT_MAX_ORDER_USDT` 配置。每次必须传入稳定且唯一的 `intent_id` 关键字参数。
