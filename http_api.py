@@ -196,7 +196,7 @@ def make_server(port=DEFAULT_PORT, gateway=None, token=None, dispatcher=None):
     owns_dispatcher = dispatcher is None
     dispatcher = dispatcher or FastOrderDispatcher()
     handler = type("BoundEventHandler", (_Handler,), {
-        "gateway": gateway or EventContractGateway(),
+        "gateway": gateway or EventContractGateway(dispatcher=dispatcher),
         "dispatcher": dispatcher,
         "api_token": secret,
     })
