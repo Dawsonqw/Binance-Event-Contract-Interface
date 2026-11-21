@@ -6,6 +6,8 @@ Trading is opt-in and delegates all risk guards to safe_orders.
 from dataclasses import dataclass
 from typing import Protocol, Optional
 
+from binance_event_queries import BinanceEventQueryProvider
+
 from order_queries import (
     get_local_order,
     list_local_orders,
@@ -104,6 +106,8 @@ class ExchangeQueryProvider(Protocol):
     def get_order(self, order_id: str): ...
     def get_quote(self, symbol: str, time_increments: str): ...
     def get_settlement(self, order_id: str): ...
+    def list_ongoing_orders(self, page: int = 1): ...
+    def list_closed_orders(self, page: int = 1): ...
 
 
 class QueryInterface:
@@ -116,13 +120,24 @@ class QueryInterface:
 
     def capabilities(self):
         supported = self.remote_provider is not None
+        available = getattr(self.remote_provider, "capabilities", None)
+        details = available() if callable(available) else {}
         return {
             "trading": "opt_in_unverified_unofficial",
             "local_order_query": True,
             "local_session_metadata": True,
-            "exchange_order_query": supported,
-            "live_market_quote": supported,
-            "exchange_settlement_query": supported,
+            "exchange_order_query": details.get("exchange_order_query", supported),
+            "exchange_ongoing_orders": details.get(
+                "exchange_ongoing_orders", supported and hasattr(self.remote_provider, "list_ongoing_orders")
+            ),
+            "exchange_closed_orders": details.get(
+                "exchange_closed_orders", supported and hasattr(self.remote_provider, "list_closed_orders")
+            ),
+            "exchange_history_pagination_verified": details.get(
+                "exchange_history_pagination_verified", False
+            ),
+            "live_market_quote": details.get("live_market_quote", supported),
+            "exchange_settlement_query": details.get("exchange_settlement_query", supported),
             "local_records_are_not_exchange_confirmation": True,
         }
 
@@ -141,6 +156,16 @@ class QueryInterface:
             return self.dispatcher.journal.list(limit)
         return list_local_orders(limit)
 
+    def list_ongoing_orders(self, page=1):
+        if self.remote_provider is None or not hasattr(self.remote_provider, "list_ongoing_orders"):
+            raise RemoteQueryUnavailable("No verified ongoing event-contract order list provider")
+        return self.remote_provider.list_ongoing_orders(page=page)
+
+    def list_closed_orders(self, page=1):
+        if self.remote_provider is None or not hasattr(self.remote_provider, "list_closed_orders"):
+            raise RemoteQueryUnavailable("No verified closed event-contract order list provider")
+        return self.remote_provider.list_closed_orders(page=page)
+
     def get_exchange_order(self, order_id):
         return self.remote_provider.get_order(order_id) if self.remote_provider is not None else query_exchange_order(order_id)
 
@@ -157,4 +182,7 @@ class EventContractGateway:
     def __init__(self, query_provider: Optional[ExchangeQueryProvider] = None,
                  dispatcher=None):
         self.trading = TradingInterface(dispatcher=dispatcher)
-        self.queries = QueryInterface(remote_provider=query_provider, dispatcher=dispatcher)
+        self.queries = QueryInterface(
+            remote_provider=query_provider if query_provider is not None else BinanceEventQueryProvider(),
+            dispatcher=dispatcher,
+        )
