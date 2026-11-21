@@ -1,4 +1,4 @@
-requests
-playwright
-qrcode
-pillow
+# Pinned direct dependencies; Pillow is not required for terminal QR codes.
+requests==2.34.2
+playwright==1.65.2
+qrcode==8.2
