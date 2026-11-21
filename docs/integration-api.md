@@ -40,6 +40,12 @@ request = OrderRequest(
 # gateway.trading.submit_order(request)  # 默认禁用，切勿随意取消注释
 ```
 
+## 未来接入币安真实查询后端
+
+SDK 现支持通过 `EventContractGateway(query_provider=MyVerifiedProvider())` 注入自定义查询实现。Provider 需实现 `get_order(order_id)`、`get_quote(symbol, time_increments)`、`get_settlement(order_id)`。
+
+**目前没有提供可验证的 Binance 事件合约查询 Provider**，默认会明确抛出 `RemoteQueryUnavailable`，HTTP 端返回 501。将来找到合法、稳定且经过验证的数据接口后，只需替换 Provider，不必修改策略调用方的接口定义。插入 Provider 之前必须核实查询结果的数据来源、认证方式和实时性。
+
 ## 本机 HTTP API（标准库，无额外 Web 框架依赖）
 
 绑定 **127.0.0.1:18765**，不能直接绑定 0.0.0.0。所有路由必须提供 `Authorization: Bearer <API_TOKEN>`，API_TOKEN 至少 32 个 ASCII 字符。API_TOKEN 与币安 `p20t` 是两个独立秘密：**不得将币安 Token 传给外部客户端。**
