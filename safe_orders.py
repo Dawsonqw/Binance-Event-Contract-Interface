@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -26,6 +27,10 @@ class OrderNotConfirmed(RuntimeError):
 
 class DuplicateIntent(RuntimeError):
     """This intent has already been attempted locally."""
+
+class SignalExpiredBeforeSend(RuntimeError):
+    """Signal deadline passed; confirmed NOT transmitted by this call."""
+
 
 
 def _positive_decimal(value, field):
@@ -124,7 +129,8 @@ def _confirmed_order_id(payload):
 
 
 def place_order_web(csrftoken, p20t, orderAmount, timeIncrements, symbolName,
-                    payoutRatio, direction, *, intent_id):
+                    payoutRatio, direction, *, intent_id, transport=None,
+                    timeout=(5, 12), deadline_ms=None):
     """Submit at most once per intent_id. Never retry unknown outcomes.
 
     Requires explicit live opt-in, non-root execution and a per-order cap.
@@ -141,6 +147,8 @@ def place_order_web(csrftoken, p20t, orderAmount, timeIncrements, symbolName,
     # This check does not prove exchange-side acceptance.
     require_fresh_session(csrftoken, p20t)
     fields = _validate(orderAmount, timeIncrements, symbolName, payoutRatio, direction, intent_id)
+    if deadline_ms is not None and time.time_ns() // 1_000_000 >= deadline_ms:
+        raise SignalExpiredBeforeSend("Signal stale before local intent; no request transmitted")
     intent_path = _record_intent(intent_id, fields)
     headers = {
         "content-type": "application/json",
@@ -150,7 +158,12 @@ def place_order_web(csrftoken, p20t, orderAmount, timeIncrements, symbolName,
     }
     try:
         # No automatic retries: a timeout might still have created an order.
-        response = requests.post(ORDER_URL, headers=headers, json=fields, timeout=(5, 12), allow_redirects=False)
+        # A deadline can expire while syncing the durable dedupe marker.
+        # Treat this as a definite drop: no HTTPS request has been started.
+        if deadline_ms is not None and time.time_ns() // 1_000_000 >= deadline_ms:
+            raise SignalExpiredBeforeSend("Signal stale at network boundary; no request transmitted")
+        post = requests.post if transport is None else transport.post
+        response = post(ORDER_URL, headers=headers, json=fields, timeout=timeout, allow_redirects=False)
         response.raise_for_status()
         if not (200 <= response.status_code < 300):
             raise OrderNotConfirmed("Unexpected HTTP redirect or response; reconcile in Binance App")

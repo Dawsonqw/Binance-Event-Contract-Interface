@@ -45,9 +45,29 @@ class OrderRequest:
 class TradingInterface:
     """Trading adapter. Never retrieves login credentials from API clients."""
 
-    def submit_order(self, order: OrderRequest):
+    def __init__(self, dispatcher=None):
+        self.dispatcher = dispatcher
+
+    def submit_order_async(self, order: OrderRequest, *, signal_time_ms=None, max_age_ms=1000):
+        """Durably enqueue without waiting for an exchange response."""
         if not isinstance(order, OrderRequest):
-            raise TypeError("submit_order expects OrderRequest")
+            raise TypeError("submit_order_async expects OrderRequest")
+        if self.dispatcher is None:
+            raise RuntimeError("Use EventContractGateway(dispatcher=FastOrderDispatcher()) or HTTP API")
+        return self.dispatcher.submit(
+            order, signal_time_ms=signal_time_ms, max_age_ms=max_age_ms,
+        )
+
+    def submit_order(self, order: OrderRequest, *, signal_time_ms=None, max_age_ms=1000):
+        """Default SDK submission is nonblocking; 202/QUEUED is not execution."""
+        return self.submit_order_async(
+            order, signal_time_ms=signal_time_ms, max_age_ms=max_age_ms,
+        )
+
+    def submit_order_sync_legacy(self, order: OrderRequest):
+        """Blocking compatibility path. Do not use in latency-sensitive strategies."""
+        if not isinstance(order, OrderRequest):
+            raise TypeError("submit_order_sync_legacy expects OrderRequest")
         # Existing safe_orders enforces the live-trading opt-in, UID, cap,
         # session freshness, durable intent and network timeouts.
         from os import environ, geteuid
@@ -89,8 +109,10 @@ class ExchangeQueryProvider(Protocol):
 class QueryInterface:
     """Explicit separation of LOCAL audit state and EXCHANGE-backed queries."""
 
-    def __init__(self, remote_provider: Optional[ExchangeQueryProvider] = None):
+    def __init__(self, remote_provider: Optional[ExchangeQueryProvider] = None,
+                 dispatcher=None):
         self.remote_provider = remote_provider
+        self.dispatcher = dispatcher
 
     def capabilities(self):
         supported = self.remote_provider is not None
@@ -108,9 +130,15 @@ class QueryInterface:
         return get_session_status()
 
     def get_order(self, intent_id):
+        if self.dispatcher is not None:
+            record = self.dispatcher.journal.get(intent_id)
+            if record is not None:
+                return record
         return get_local_order(intent_id)
 
     def list_orders(self, limit=50):
+        if self.dispatcher is not None:
+            return self.dispatcher.journal.list(limit)
         return list_local_orders(limit)
 
     def get_exchange_order(self, order_id):
@@ -126,6 +154,7 @@ class QueryInterface:
 class EventContractGateway:
     """Convenience composition; trading and queries are independent interfaces."""
 
-    def __init__(self, query_provider: Optional[ExchangeQueryProvider] = None):
-        self.trading = TradingInterface()
-        self.queries = QueryInterface(remote_provider=query_provider)
+    def __init__(self, query_provider: Optional[ExchangeQueryProvider] = None,
+                 dispatcher=None):
+        self.trading = TradingInterface(dispatcher=dispatcher)
+        self.queries = QueryInterface(remote_provider=query_provider, dispatcher=dispatcher)

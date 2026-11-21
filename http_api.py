@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from event_gateway import EventContractGateway, OrderRequest
+from fast_orders import (FastOrderDispatcher, DispatcherUnavailable,
+                         StaleSignal, ConflictingIntent, DEFAULT_MAX_SIGNAL_AGE_MS)
 from order_queries import LocalRecordError, RemoteQueryUnavailable
 from safe_orders import DuplicateIntent, OrderNotConfirmed, LIVE_OPT_IN
 from session_lifecycle import AuthenticationRequired
@@ -24,6 +26,7 @@ MAX_BODY_BYTES = 4096
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     gateway = None
+    dispatcher = None
     api_token = None
     server_version = "BinanceEventGateway/1"
     sys_version = ""
@@ -67,9 +70,14 @@ class _Handler(BaseHTTPRequestHandler):
                         "service": "running",
                         "exchange_connected": False,
                         "live_trading_enabled": os.environ.get("BINANCE_EVENT_LIVE_TRADING") == LIVE_OPT_IN,
+                        "dispatcher": self.dispatcher.health(),
                     })
                 if path == "/v1/capabilities":
-                    return self._json(200, self.gateway.queries.capabilities())
+                    result = self.gateway.queries.capabilities()
+                    result["nonblocking_order_submission"] = True
+                    result["durable_intent_journal"] = "sqlite_wal"
+                    result["default_max_signal_age_ms"] = DEFAULT_MAX_SIGNAL_AGE_MS
+                    return self._json(200, result)
                 if path == "/v1/session":
                     return self._json(200, self.gateway.queries.get_session())
                 if path == "/v1/orders":
@@ -77,10 +85,12 @@ class _Handler(BaseHTTPRequestHandler):
                     raw = params.get("limit", ["50"])
                     if len(raw) != 1 or not raw[0].isdecimal():
                         raise ValueError("limit must be a decimal integer")
-                    return self._json(200, {"items": self.gateway.queries.list_orders(int(raw[0]))})
+                    return self._json(200, {"items": self.dispatcher.journal.list(int(raw[0]))})
                 if path.startswith("/v1/orders/"):
                     intent_id = unquote(path[len("/v1/orders/"):])
-                    record = self.gateway.queries.get_order(intent_id)
+                    record = self.dispatcher.journal.get(intent_id)
+                    if record is None:
+                        record = self.gateway.queries.get_order(intent_id)  # legacy file journal
                     if record is None:
                         return self._error(404, "not_found", "No local record for that intent_id")
                     return self._json(200, record)
@@ -106,22 +116,29 @@ class _Handler(BaseHTTPRequestHandler):
                     payload = json.loads(self.rfile.read(int(size)))
                 except (ValueError, UnicodeDecodeError):
                     return self._error(400, "invalid_json", "Invalid JSON request")
-                order = OrderRequest.from_dict(payload)
-                try:
-                    result = self.gateway.trading.submit_order(order)
-                except OrderNotConfirmed:
-                    # A timeout could mean an executed order. Never imply failure.
-                    return self._json(202, {
-                        "intent_id": order.intent_id,
-                        "status": "submission_attempted_outcome_unknown",
-                        "source": "local_audit_only",
-                        "exchange_verified": False,
-                        "action": "DO_NOT_RETRY_VERIFY_IN_BINANCE_APP",
-                    })
-                return self._json(200, result)
+                if not isinstance(payload, dict):
+                    raise ValueError("Expected a JSON object")
+                # Optional timing fields allow the caller to prove signal age.
+                timing_fields = {"signal_time_ms", "max_age_ms"}
+                order_payload = {key: value for key, value in payload.items() if key not in timing_fields}
+                order = OrderRequest.from_dict(order_payload)
+                result = self.dispatcher.submit(
+                    order,
+                    signal_time_ms=payload.get("signal_time_ms"),
+                    max_age_ms=payload.get("max_age_ms", DEFAULT_MAX_SIGNAL_AGE_MS),
+                )
+                # 202 means only 'durably queued'; never 'executed'.
+                # Duplicate IDs return existing status without another submission.
+                return self._json(200 if result["already_exists"] else 202, result)
 
             return self._error(404, "not_found", "Endpoint not found")
 
+        except StaleSignal:
+            return self._error(410, "signal_stale_not_sent", "Signal expired before acceptance; not submitted")
+        except ConflictingIntent:
+            return self._error(409, "conflicting_intent", "Intent ID already used for different order fields")
+        except DispatcherUnavailable:
+            return self._error(503, "dispatcher_unavailable", "Order dispatcher unavailable; not accepted")
         except AuthenticationRequired:
             return self._error(409, "authentication_required", "Local Binance session is unavailable or expiring")
         except FileNotFoundError:
@@ -156,7 +173,18 @@ class _Handler(BaseHTTPRequestHandler):
         self._dispatch("POST")
 
 
-def make_server(port=DEFAULT_PORT, gateway=None, token=None):
+class OrderHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 128
+
+    def server_close(self):
+        try:
+            self.dispatcher.close()
+        finally:
+            super().server_close()
+
+
+def make_server(port=DEFAULT_PORT, gateway=None, token=None, dispatcher=None):
     if os.geteuid() == 0:
         raise PermissionError("Never start the HTTP gateway as root")
     secret = token if token is not None else os.environ.get("BINANCE_EVENT_API_TOKEN", "")
@@ -165,11 +193,21 @@ def make_server(port=DEFAULT_PORT, gateway=None, token=None):
     if not isinstance(port, int) or not (0 <= port <= 65535):
         raise ValueError("port must be between 0 and 65535")
     # Never bind to a public interface; use SSH port forwarding.
+    owns_dispatcher = dispatcher is None
+    dispatcher = dispatcher or FastOrderDispatcher()
     handler = type("BoundEventHandler", (_Handler,), {
-        "gateway": gateway or EventContractGateway(),
+        "gateway": gateway or EventContractGateway(dispatcher=dispatcher),
+        "dispatcher": dispatcher,
         "api_token": secret,
     })
-    return ThreadingHTTPServer((DEFAULT_HOST, port), handler)
+    try:
+        server = OrderHTTPServer((DEFAULT_HOST, port), handler)
+        server.dispatcher = dispatcher
+        return server
+    except BaseException:
+        if owns_dispatcher:
+            dispatcher.close()
+        raise
 
 
 def main(argv=None):

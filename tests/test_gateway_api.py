@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 import http_api
 import safe_orders
 from event_gateway import EventContractGateway, OrderRequest
+from fast_orders import FastOrderDispatcher, FINAL_STATES
 from order_queries import RemoteQueryUnavailable, get_local_order, list_local_orders
 from secure_storage import save_token
 
@@ -107,7 +108,9 @@ class GatewayTests(unittest.TestCase):
 class HTTPGatewayTests(GatewayTests):
     def setUp(self):
         super().setUp()
-        self.server = http_api.make_server(port=0, gateway=self.gateway)
+        self.transport = Mock()
+        self.dispatcher = FastOrderDispatcher(transport_factory=lambda: self.transport)
+        self.server = http_api.make_server(port=0, gateway=self.gateway, dispatcher=self.dispatcher)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self._stop)
@@ -129,6 +132,15 @@ class HTTPGatewayTests(GatewayTests):
         headers_out = dict(res.getheaders())
         conn.close()
         return res.status, data, headers_out
+
+    def wait_final(self, intent_id, timeout=3):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self.dispatcher.journal.get(intent_id)
+            if state and state["status"] in FINAL_STATES:
+                return state
+            time.sleep(0.005)
+        self.fail("Background worker did not finish intent in time")
 
     def test_unauthorized_and_loopback_only(self):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
@@ -178,32 +190,77 @@ class HTTPGatewayTests(GatewayTests):
         exchange_response.json.return_value = {
             "success": True, "data": {"orderId": "EX-123"},
         }
-        with patch.object(safe_orders.requests, "post", return_value=exchange_response) as post:
-            s, body, _ = self.request("POST", "/v1/orders", ORDER)
-            self.assertEqual((s, body["order_id"]), (200, "EX-123"))
-            self.assertEqual(body["status"], "api_acknowledged_not_settlement_verified")
-            self.assertFalse(body["exchange_verified"])
-            self.assertEqual(post.call_count, 1)
-            s, body, _ = self.request("POST", "/v1/orders", ORDER)
-            self.assertEqual(s, 409)
-            self.assertEqual(body["error"]["code"], "duplicate_intent")
-            self.assertEqual(post.call_count, 1)
-            s, body, _ = self.request("GET", "/v1/orders/strategy-demo-001")
-            self.assertEqual((s, body["order_id"]), (200, "EX-123"))
-            s, body, _ = self.request("GET", "/v1/orders?limit=1")
-            self.assertEqual(len(body["items"]), 1)
+        self.transport.post.return_value = exchange_response
+        s, body, _ = self.request("POST", "/v1/orders", ORDER)
+        self.assertEqual((s, body["status"]), (202, "QUEUED"))
+        self.assertFalse(body["already_exists"])
+        final = self.wait_final(ORDER["intent_id"])
+        self.assertEqual(final["status"], "ACKNOWLEDGED_NOT_SETTLEMENT_VERIFIED")
+        self.assertEqual(final["order_id"], "EX-123")
+        self.assertFalse(final["exchange_verified"])
+        self.assertEqual(self.transport.post.call_count, 1)
+        s, body, _ = self.request("POST", "/v1/orders", ORDER)
+        self.assertEqual(s, 200)
+        self.assertTrue(body["already_exists"])
+        self.assertEqual(self.transport.post.call_count, 1)
+        s, body, _ = self.request("GET", "/v1/orders/strategy-demo-001")
+        self.assertEqual((s, body["order_id"]), (200, "EX-123"))
+        s, body, _ = self.request("GET", "/v1/orders?limit=1")
+        self.assertEqual(len(body["items"]), 1)
 
-    def test_timeout_returned_as_unknown_not_failure(self):
+    def test_timeout_marked_unknown_not_failed_or_retried(self):
         os.environ["BINANCE_EVENT_LIVE_TRADING"] = safe_orders.LIVE_OPT_IN
         save_token({
             "csrftoken": "csrf-test", "p20t": "cookie-test",
             "expirationTimestamp": int(time.time()) + 7200,
         })
-        with patch.object(safe_orders.requests, "post", side_effect=safe_orders.requests.Timeout):
-            s, body, _ = self.request("POST", "/v1/orders", ORDER)
+        self.transport.post.side_effect = safe_orders.requests.Timeout("no response")
+        s, body, _ = self.request("POST", "/v1/orders", ORDER)
         self.assertEqual(s, 202)
-        self.assertEqual(body["status"], "submission_attempted_outcome_unknown")
-        self.assertEqual(body["action"], "DO_NOT_RETRY_VERIFY_IN_BINANCE_APP")
+        self.assertEqual(body["status"], "QUEUED")
+        final = self.wait_final(ORDER["intent_id"])
+        self.assertEqual(final["status"], "OUTCOME_UNKNOWN")
+        self.assertFalse(final["safe_to_auto_retry"])
+        self.assertEqual(self.transport.post.call_count, 1)
+        s, body, _ = self.request("POST", "/v1/orders", ORDER)
+        self.assertEqual(s, 200)
+        self.assertTrue(body["already_exists"])
+        self.assertEqual(self.transport.post.call_count, 1)
+
+    def test_submission_is_fast_even_while_exchange_request_blocks(self):
+        os.environ["BINANCE_EVENT_LIVE_TRADING"] = safe_orders.LIVE_OPT_IN
+        save_token({
+            "csrftoken": "csrf-test", "p20t": "cookie-test",
+            "expirationTimestamp": int(time.time()) + 7200,
+        })
+        started = threading.Event()
+        release = threading.Event()
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {"success": True, "data": {"orderId": "EX-555"}}
+
+        def delayed_network(*args, **kwargs):
+            started.set()
+            release.wait(timeout=3)
+            return response
+
+        self.transport.post.side_effect = delayed_network
+        try:
+            begin = time.monotonic()
+            s, body, _ = self.request("POST", "/v1/orders", ORDER)
+            elapsed = time.monotonic() - begin
+            self.assertEqual(s, 202)
+            self.assertLess(elapsed, 0.5)
+            self.assertTrue(started.wait(1))
+            begin = time.monotonic()
+            s, duplicate, _ = self.request("POST", "/v1/orders", ORDER)
+            self.assertEqual(s, 200)
+            self.assertTrue(duplicate["already_exists"])
+            self.assertLess(time.monotonic() - begin, 0.5)
+        finally:
+            release.set()
+        self.wait_final(ORDER["intent_id"])
+        self.assertEqual(self.transport.post.call_count, 1)
 
     def test_schema_validation(self):
         s, body, _ = self.request("GET", "/v1/orders?limit=9999")

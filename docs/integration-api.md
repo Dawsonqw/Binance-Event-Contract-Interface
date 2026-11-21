@@ -46,6 +46,53 @@ SDK 现支持通过 `EventContractGateway(query_provider=MyVerifiedProvider())` 
 
 **目前没有提供可验证的 Binance 事件合约查询 Provider**，默认会明确抛出 `RemoteQueryUnavailable`，HTTP 端返回 501。将来找到合法、稳定且经过验证的数据接口后，只需替换 Provider，不必修改策略调用方的接口定义。插入 Provider 之前必须核实查询结果的数据来源、认证方式和实时性。
 
+**Python SDK 兼容性提醒**：现在 `TradingInterface.submit_order()` 也是**默认非阻塞**的，与 `submit_order_async()` 等价；需要显式传入 `dispatcher=FastOrderDispatcher()`。旧同步路径仅保留为 `submit_order_sync_legacy()`，不应在实时策略中调用。接口行为变化会影响之前假设“调用返回即交易成功”的代码，迁移时必须调整为异步状态轮询。
+
+## 非阻塞下单：2026-11 新版本
+
+**POST /v1/orders 已改为非阻塞语义（有意改变旧行为）**：服务端首先同步执行 SQLite WAL 持久化和按 `intent_id` 唯一去重，然后立即返回 HTTP **202 + 状态 QUEUED**，后台只有一个发送工作线程按 FIFO 发出网络请求。*HTTP 202 只表示本地持久受理，不代表币安已经接受或成交*。
+
+发单流程：`策略信号 -> 持久化幂等 ID -> 快速回 202 -> 单独后台工作线程 -> HTTP 下单 -> 本地结果状态`。策略不需要等待交易所；可按 `GET /v1/orders/{intent_id}` 查询异步结果。Python 直接调用使用 `EventContractGateway(dispatcher=FastOrderDispatcher()).trading.submit_order_async(order)`，必须由同一进程持有并关闭 Dispatcher。
+
+### 信号时效和超时语义
+
+- `signal_time_ms`：可选，由策略提供**Unix 时间戳毫秒整数**；如果不传，则以 API 接收时为起点，**无法发现策略本身已延迟的信号**。建议策略务必传入。
+- `max_age_ms`：可选，默认 1000ms，可设置 50–5000ms。超过截止时间且**未开始网络请求**，记为 `DROPPED_STALE_BEFORE_SEND`，确认不会发送。
+- HTTP 使用可复用的 `requests.Session` 连接池。默认连接超时 0.7 秒、响应读取超时 1.3 秒，**不是严格的总耗时上限**；TLS、DNS 和调度还可能增加耗时。
+- 网络开始后才超时，记为 `OUTCOME_UNKNOWN`：不等于币安未收到，不自动补单，更不能换个 `intent_id` 盲目重发。
+- 重启不会自动重放旧订单：原 `QUEUED` 标记为 `DROPPED_STALE_BEFORE_SEND`，原 `DISPATCHING` 标记为 `OUTCOME_UNKNOWN`。
+- 同一 ID 重复调用返回现有状态、`already_exists: true`，不会再次发出；同一 ID 携带不同业务参数返回 HTTP 409。
+- 默认队列容量 128；超载会快速拒绝未受理的信号。单发送线程避免多线程争用同一登录凭证。
+- sqlite 是**本机**幂等库，不保证不同机器、不同 ID、其他人工/App 下单的全局去重。
+
+示例（只有用户显式开启实盘才可能提交；请不要直接执行）：
+
+```json
+{
+  "intent_id":"signal-20261121-001",
+  "orderAmount":"5",
+  "timeIncrements":"TEN_MINUTE",
+  "symbolName":"BTCUSDT",
+  "payoutRatio":"0.80",
+  "direction":"LONG",
+  "signal_time_ms":1795260000000,
+  "max_age_ms":1000
+}
+```
+
+上述时间戳与赔率都是**格式示例**，实际策略必须填写当前信号和真实报价。不要把示例 0.80 当实时赔率。
+
+### 非阻塞订单查询字段
+
+`GET /v1/orders/{intent_id}` 返回 SQLite 记录，重要状态：
+`QUEUED`、`DISPATCHING`、`DROPPED_STALE_BEFORE_SEND`、
+`REJECTED_AUTH_BEFORE_SEND`、`REJECTED_DISABLED_BEFORE_SEND`、
+`ACKNOWLEDGED_NOT_SETTLEMENT_VERIFIED`、`OUTCOME_UNKNOWN`。
+
+所有记录都带有 `exchange_verified:false`、`final_settlement_verified:false`、`safe_to_auto_retry:false`。这三者不会因为拿到订单号而自动置真。
+
+`GET /v1/orders` 使用 SQLite 索引查询（默认 50，最多 100）；原来文件格式的历史订单仍可按 `intent_id` 单独读取，但不再出现在新分页列表里。真实交易所订单及赔率、结算接口仍为 HTTP 501。
+
 ## 本机 HTTP API（标准库，无额外 Web 框架依赖）
 
 绑定 **127.0.0.1:18765**，不能直接绑定 0.0.0.0。所有路由必须提供 `Authorization: Bearer <API_TOKEN>`，API_TOKEN 至少 32 个 ASCII 字符。API_TOKEN 与币安 `p20t` 是两个独立秘密：**不得将币安 Token 传给外部客户端。**
