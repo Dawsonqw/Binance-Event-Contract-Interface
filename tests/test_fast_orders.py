@@ -70,7 +70,7 @@ class FastOrdersTests(unittest.TestCase):
             self.assertEqual(settled["status"], "ACKNOWLEDGED_NOT_SETTLEMENT_VERIFIED")
             self.assertFalse(settled["exchange_verified"])
             self.assertEqual(self.transport.post.call_count, 1)
-            second = gateway.trading.submit_order_async(order, signal_time_ms=1)
+            second = gateway.trading.submit_order(order, signal_time_ms=1)
             self.assertTrue(second["already_exists"])
             self.assertEqual(self.transport.post.call_count, 1)
             with self.assertRaises(ConflictingIntent):
