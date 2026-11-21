@@ -1,0 +1,16 @@
+# Local secrets and transient files; never commit authenticators.
+token.json
+qrcode.jpg
+qrcode.png
+.env
+.env.*
+!.env.example
+*.log
+*.py[cod]
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+browser-profile/
+playwright-binance/
+intents/
