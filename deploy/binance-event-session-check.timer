@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Binance event contract session expiry every six hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+AccuracySec=10min
+Persistent=true
+Unit=binance-event-session-check.service
+
+[Install]
+WantedBy=timers.target
