@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from event_gateway import EventContractGateway, OrderRequest
+from binance_event_queries import ExchangeQueryError
 from fast_orders import (FastOrderDispatcher, DispatcherUnavailable,
                          StaleSignal, ConflictingIntent, DEFAULT_MAX_SIGNAL_AGE_MS)
 from order_queries import LocalRecordError, RemoteQueryUnavailable
@@ -94,6 +95,17 @@ class _Handler(BaseHTTPRequestHandler):
                     if record is None:
                         return self._error(404, "not_found", "No local record for that intent_id")
                     return self._json(200, record)
+                if path in ("/v1/exchange/orders/ongoing", "/v1/exchange/orders/closed"):
+                    params = parse_qs(route.query, keep_blank_values=True)
+                    if set(params) - {"page"}:
+                        raise ValueError("Unsupported query parameter")
+                    values = params.get("page", ["1"])
+                    if len(values) != 1 or not values[0].isdecimal():
+                        raise ValueError("page must be a positive integer")
+                    page = int(values[0])
+                    if path.endswith("/ongoing"):
+                        return self._json(200, self.gateway.queries.list_ongoing_orders(page=page))
+                    return self._json(200, self.gateway.queries.list_closed_orders(page=page))
                 if path.startswith("/v1/exchange/orders/"):
                     self.gateway.queries.get_exchange_order(unquote(path.split("/")[-1]))
                 if path == "/v1/quotes":
@@ -147,6 +159,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(403, "trading_disabled", "Live trading is disabled or credentials are not accessible")
         except DuplicateIntent:
             return self._error(409, "duplicate_intent", "Intent has already been attempted; query local state, do not retry")
+        except ExchangeQueryError:
+            return self._error(502, "exchange_query_failed", "Binance read-only order query failed; no order was submitted")
         except RemoteQueryUnavailable:
             return self._error(501, "exchange_query_unavailable", "No verified event-contract exchange query endpoint")
         except LocalRecordError:
@@ -180,6 +194,10 @@ class OrderHTTPServer(ThreadingHTTPServer):
     def server_close(self):
         try:
             self.dispatcher.close()
+            provider = getattr(self.RequestHandlerClass.gateway.queries, "remote_provider", None)
+            closer = getattr(provider, "close", None)
+            if callable(closer):
+                closer()
         finally:
             super().server_close()
 
