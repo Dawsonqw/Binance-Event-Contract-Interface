@@ -40,6 +40,9 @@ def get_session_status(*, now=None, warn_before_seconds=WARN_BEFORE_SECONDS):
         token = load_token()
     except FileNotFoundError:
         return {"state": "missing", "expiry_utc": None, "remaining_seconds": None}
+    except (ValueError, PermissionError, OSError):
+        # No token content or parser error details are returned to callers/logs.
+        return {"state": "invalid_local_state", "expiry_utc": None, "remaining_seconds": None}
 
     expiry = _expiry_from_token(token)
     if expiry is None:
@@ -70,7 +73,7 @@ def require_fresh_session(csrftoken, p20t, *, now=None, min_remaining_seconds=MI
         raise AuthenticationRequired("Credentials must be read from the secure local state")
     try:
         local = load_token()
-    except (FileNotFoundError, ValueError, PermissionError) as exc:
+    except (FileNotFoundError, ValueError, PermissionError, OSError):
         raise AuthenticationRequired("No valid private session file; authenticate interactively") from None
 
     if not (
@@ -99,7 +102,7 @@ def main(argv=None):
     if status["expiry_utc"]:
         print("Stored expiry (UTC):", status["expiry_utc"])
         print("Seconds remaining:", status["remaining_seconds"])
-    if status["state"] in ("missing", "expired", "unknown_expiry"):
+    if status["state"] in ("missing", "expired", "unknown_expiry", "invalid_local_state"):
         print("Action: stop trading and re-authenticate using Binance App QR confirmation")
         return 2
     if status["state"] == "expiring":
