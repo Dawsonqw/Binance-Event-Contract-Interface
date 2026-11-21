@@ -32,6 +32,16 @@ class SessionLifecycleTests(unittest.TestCase):
         with self.assertRaises(AuthenticationRequired):
             require_fresh_session("a-secret", "b-secret", now=self.now)
 
+    def test_corrupt_token_fails_closed_without_dumping_content(self):
+        directory = Path(os.environ["BINANCE_EVENT_STATE_DIR"])
+        directory.mkdir(mode=0o700)
+        (directory / "token.json").write_text("malformed credentials", encoding="utf-8")
+        (directory / "token.json").chmod(0o600)
+        self.assertEqual(get_session_status(now=self.now)["state"], "invalid_local_state")
+        with self.assertRaises(AuthenticationRequired) as ctx:
+            require_fresh_session("a-secret", "b-secret", now=self.now)
+        self.assertNotIn("malformed credentials", str(ctx.exception))
+
     def test_known_expiry(self):
         self._save(self.now + 100000)
         status = get_session_status(now=self.now)
