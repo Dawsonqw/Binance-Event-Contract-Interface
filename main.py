@@ -1,22 +1,26 @@
 import os
 import re
-import json
-import requests
+import sys
+from pathlib import Path
 import qrcode
 import shutil
 from http.cookies import SimpleCookie
 from email.utils import parsedate_to_datetime
 from playwright.sync_api import sync_playwright
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-os.chdir(current_dir)
+from secure_storage import load_token, save_token, state_dir
+from safe_orders import place_order_web
 
 WIN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 
 def launch_persistent_ctx(pw, reset=False, headless=True):
-    user_data_dir = os.path.expanduser("~/.config/playwright-binance")
-    if reset and os.path.exists(user_data_dir):
+    user_data_dir = state_dir() / "browser-profile"
+    if user_data_dir.is_symlink():
+        raise RuntimeError("Refusing a symlinked browser profile")
+    if reset and user_data_dir.exists():
         shutil.rmtree(user_data_dir)
+    user_data_dir.mkdir(mode=0o700, exist_ok=True)
+    user_data_dir.chmod(0o700)
 
     args = [
         "--no-first-run",
@@ -94,6 +98,10 @@ def print_qr(data):
         print(white * (w + margin * 2))
 
 def get_token(reset=False, headless=True):
+    if os.geteuid() == 0:
+        raise PermissionError("Do not run the Binance login browser as root")
+    if not sys.stdout.isatty():
+        raise RuntimeError("Login requires an interactive terminal to display the one-time QR code")
     csrftoken = ""
     p20t = ""
     expirationTimestamp = -1
@@ -139,8 +147,6 @@ def get_token(reset=False, headless=True):
                         qr_results.append(code)
                         print("请使用 Binance App 扫描以下二维码登录")
                         print_qr(code)
-                        img = qrcode.make(code).convert("RGB")
-                        img.save("qrcode.jpg", format="JPEG", quality=100)
                 elif "https://accounts.binance.com/bapi/accounts/v2/private/authcenter/setTrustDevice" in url:
                     resp = req.response()
                     if not resp: return
@@ -168,21 +174,15 @@ def get_token(reset=False, headless=True):
 
             if csrftoken and p20t:
                 token_dict = {"csrftoken": csrftoken, "p20t": p20t, "expirationTimestamp": expirationTimestamp}
-                if os.path.exists("token.json"):
-                    with open("token.json", "r") as f:
-                        old_token_dict = json.load(f)
-                    if token_dict["p20t"] != old_token_dict.get("p20t", "") or token_dict["csrftoken"] != old_token_dict.get("csrftoken", ""):
-                        with open("token.json", "w") as f:
-                            f.write(json.dumps(token_dict, indent=4, ensure_ascii=False))
-                        print("检测到 p20t 或 csrftoken 变更, 已更新 token.json 文件")
-                    elif token_dict["expirationTimestamp"] == -1:
-                        expirationTimestamp = old_token_dict.get("expirationTimestamp", -1)
-                else:
-                    with open("token.json", "w") as f:
-                        f.write(json.dumps(token_dict, indent=4, ensure_ascii=False))
-                print("csrftoken:", csrftoken)
-                print("p20t:", p20t)
-                print("expirationTimestamp:", expirationTimestamp)
+                if expirationTimestamp == -1:
+                    try:
+                        old = load_token()
+                        if old.get("p20t") == p20t and old.get("csrftoken") == csrftoken:
+                            token_dict["expirationTimestamp"] = old.get("expirationTimestamp", -1)
+                    except FileNotFoundError:
+                        pass
+                save_token(token_dict)
+                print("登录凭证已安全保存到私有状态目录；不会打印 Token。")
                 ctx.close()
                 break
 
@@ -219,29 +219,5 @@ def get_token(reset=False, headless=True):
             except:
                 pass
 
-def place_order_web(csrftoken, p20t, orderAmount, timeIncrements, symbolName, payoutRatio, direction):
-    url = "https://www.binance.com/bapi/futures/v2/private/future/event-contract/place-order"
-    headers = {
-        "content-type": "application/json",
-        "clienttype": "web",
-        "csrftoken": csrftoken,
-        "cookie": f"p20t={p20t}"
-    }
-    data = {
-        "orderAmount": orderAmount,
-        "timeIncrements": timeIncrements,
-        "symbolName": symbolName,
-        "payoutRatio": payoutRatio,
-        "direction": direction
-    }
-    response = requests.post(url, headers=headers, json=data)
-    return response.json()
-
 if __name__ == "__main__":
-    get_token(reset=False, headless=True) # 设置 reset=True 清除浏览器缓存, headless=False 显示浏览器界面
-    # with open("token.json", "r") as f:
-    #     token_dict = json.load(f)
-    # csrftoken = token_dict["csrftoken"]
-    # p20t = token_dict["p20t"]
-    # result = place_order_web(csrftoken=csrftoken, p20t=p20t, orderAmount="5", timeIncrements="TEN_MINUTE", symbolName="BTCUSDT", payoutRatio="0.80", direction="LONG")
-    # print("下单结果:", result)
+    get_token(reset=False, headless=True)
