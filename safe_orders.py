@@ -86,6 +86,12 @@ def _record_intent(intent_id, fields):
             json.dump(record, stream, ensure_ascii=False, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
+        # Ensure the exclusive marker itself survives a crash before network I/O.
+        directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except Exception:
         # Preserve the marker even if the write was interrupted: fail closed.
         raise
@@ -140,7 +146,7 @@ def place_order_web(csrftoken, p20t, orderAmount, timeIncrements, symbolName,
     }
     try:
         # No automatic retries: a timeout might still have created an order.
-        response = requests.post(ORDER_URL, headers=headers, json=fields, timeout=(5, 12))
+        response = requests.post(ORDER_URL, headers=headers, json=fields, timeout=(5, 12), allow_redirects=False)
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError):
