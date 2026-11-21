@@ -4,6 +4,7 @@ Imports are side-effect free. No browser is launched at import time.
 Trading is opt-in and delegates all risk guards to safe_orders.
 """
 from dataclasses import dataclass
+from typing import Protocol, Optional
 
 from order_queries import (
     get_local_order,
@@ -74,17 +75,32 @@ class TradingInterface:
         return record
 
 
+class ExchangeQueryProvider(Protocol):
+    """Optional pluggable backend for independently verified query endpoints.
+
+    Never install a guessed URL here. Implementations must define the true
+    authentication and data provenance semantics before being enabled.
+    """
+    def get_order(self, order_id: str): ...
+    def get_quote(self, symbol: str, time_increments: str): ...
+    def get_settlement(self, order_id: str): ...
+
+
 class QueryInterface:
-    """Explicit separation of LOCAL state and unavailable EXCHANGE queries."""
+    """Explicit separation of LOCAL audit state and EXCHANGE-backed queries."""
+
+    def __init__(self, remote_provider: Optional[ExchangeQueryProvider] = None):
+        self.remote_provider = remote_provider
 
     def capabilities(self):
+        supported = self.remote_provider is not None
         return {
             "trading": "opt_in_unverified_unofficial",
             "local_order_query": True,
             "local_session_metadata": True,
-            "exchange_order_query": False,
-            "live_market_quote": False,
-            "exchange_settlement_query": False,
+            "exchange_order_query": supported,
+            "live_market_quote": supported,
+            "exchange_settlement_query": supported,
             "local_records_are_not_exchange_confirmation": True,
         }
 
@@ -98,18 +114,18 @@ class QueryInterface:
         return list_local_orders(limit)
 
     def get_exchange_order(self, order_id):
-        return query_exchange_order(order_id)
+        return self.remote_provider.get_order(order_id) if self.remote_provider is not None else query_exchange_order(order_id)
 
     def get_quote(self, symbol, time_increments):
-        return query_market_quote(symbol, time_increments)
+        return self.remote_provider.get_quote(symbol, time_increments) if self.remote_provider is not None else query_market_quote(symbol, time_increments)
 
     def get_settlement(self, order_id):
-        return query_settlement(order_id)
+        return self.remote_provider.get_settlement(order_id) if self.remote_provider is not None else query_settlement(order_id)
 
 
 class EventContractGateway:
     """Convenience composition; trading and queries are independent interfaces."""
 
-    def __init__(self):
+    def __init__(self, query_provider: Optional[ExchangeQueryProvider] = None):
         self.trading = TradingInterface()
-        self.queries = QueryInterface()
+        self.queries = QueryInterface(remote_provider=query_provider)
