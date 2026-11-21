@@ -2,6 +2,7 @@
 import json
 import os
 import stat
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,10 @@ class SecurityTests(unittest.TestCase):
             orderAmount="5", timeIncrements="TEN_MINUTE", symbolName="BTCUSDT",
             payoutRatio="0.80", direction="LONG", intent_id="signal-abc-001",
         )
+        save_token({
+            "csrftoken": "test-csrf", "p20t": "test-cookie",
+            "expirationTimestamp": int(time.time()) + 3 * 24 * 60 * 60,
+        })
 
     def test_token_private_atomic_round_trip(self):
         secret = {"csrftoken": "secret-csrf", "p20t": "secret-cookie", "expirationTimestamp": 111}
