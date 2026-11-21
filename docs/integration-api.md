@@ -46,6 +46,8 @@ SDK 现支持通过 `EventContractGateway(query_provider=MyVerifiedProvider())` 
 
 **目前没有提供可验证的 Binance 事件合约查询 Provider**，默认会明确抛出 `RemoteQueryUnavailable`，HTTP 端返回 501。将来找到合法、稳定且经过验证的数据接口后，只需替换 Provider，不必修改策略调用方的接口定义。插入 Provider 之前必须核实查询结果的数据来源、认证方式和实时性。
 
+**Python SDK 兼容性提醒**：现在 `TradingInterface.submit_order()` 也是**默认非阻塞**的，与 `submit_order_async()` 等价；需要显式传入 `dispatcher=FastOrderDispatcher()`。旧同步路径仅保留为 `submit_order_sync_legacy()`，不应在实时策略中调用。接口行为变化会影响之前假设“调用返回即交易成功”的代码，迁移时必须调整为异步状态轮询。
+
 ## 非阻塞下单：2026-11 新版本
 
 **POST /v1/orders 已改为非阻塞语义（有意改变旧行为）**：服务端首先同步执行 SQLite WAL 持久化和按 `intent_id` 唯一去重，然后立即返回 HTTP **202 + 状态 QUEUED**，后台只有一个发送工作线程按 FIFO 发出网络请求。*HTTP 202 只表示本地持久受理，不代表币安已经接受或成交*。
