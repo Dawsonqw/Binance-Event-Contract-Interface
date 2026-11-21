@@ -89,12 +89,14 @@ class SecurityTests(unittest.TestCase):
 
     def test_success_once_and_duplicate_blocked(self):
         response = Mock()
+        response.status_code = 200
         response.json.return_value = {"success": True, "data": {"orderId": "order-123"}}
         with patch.object(safe_orders.requests, "post", return_value=response) as post:
             result = safe_orders.place_order_web(**self.params)
             self.assertEqual(result["data"]["orderId"], "order-123")
             self.assertEqual(post.call_count, 1)
             self.assertEqual(post.call_args.kwargs["timeout"], (5, 12))
+            self.assertIs(post.call_args.kwargs["allow_redirects"], False)
             with self.assertRaises(safe_orders.DuplicateIntent):
                 safe_orders.place_order_web(**self.params)
             self.assertEqual(post.call_count, 1)
@@ -118,13 +120,24 @@ class SecurityTests(unittest.TestCase):
 
     def test_success_without_order_id_is_unknown(self):
         response = Mock()
+        response.status_code = 200
         response.json.return_value = {"success": True, "data": {}}
         with patch.object(safe_orders.requests, "post", return_value=response):
             with self.assertRaises(safe_orders.OrderNotConfirmed):
                 safe_orders.place_order_web(**self.params)
 
+    def test_redirect_response_is_unknown_without_following(self):
+        response = Mock()
+        response.status_code = 302
+        response.json.return_value = {"success": True, "data": {"orderId": "faked"}}
+        with patch.object(safe_orders.requests, "post", return_value=response) as post:
+            with self.assertRaises(safe_orders.OrderNotConfirmed):
+                safe_orders.place_order_web(**self.params)
+            self.assertIs(post.call_args.kwargs["allow_redirects"], False)
+
     def test_failed_response_is_unknown(self):
         response = Mock()
+        response.status_code = 200
         response.json.return_value = {"success": False, "code": "ERROR"}
         with patch.object(safe_orders.requests, "post", return_value=response):
             with self.assertRaises(safe_orders.OrderNotConfirmed):
