@@ -31,6 +31,17 @@
 - HTTP 服务默认只绑定 `127.0.0.1:18765`，要求单独的 Bearer Token；其他机器通过 SSH 隧道接入。
 - **查询到的只是本地提交审计记录**：币安实时订单、赔率和结算接口仍未验证，明确返回 HTTP 501，不会伪造远端查询数据。
 
+## 高频/低延迟信号：异步持久化下单
+
+新的 `POST /v1/orders` **不再等待币安网络返回**，它只负责快速写入 SQLite WAL、按 `intent_id` 去重并返回 **HTTP 202 QUEUED**；后台独立单线程执行。相同 ID 的重试只返回已存在状态，绝不会重复提交。后台发现信号过期且未发送则丢弃；发出后超时仅代表结果未知，绝不自动重发。
+
+- 默认信号最长有效期 **1000ms**（支持 `signal_time_ms` + `max_age_ms` 自定义）；策略必须提供真实信号时间戳才能识别上游延迟。
+- 默认 HTTP 连接/读取超时为 **0.7/1.3 秒**；这是 Socket 超时而不是严格总执行时间上限。
+- SQLite 持久化后才回复受理；服务重启不会重放未知订单。
+- 202 是**已排队**，不代表成交。需要轮询 `GET /v1/orders/{intent_id}`；不支持自动换 ID 重试。
+- Python SDK 使用 `FastOrderDispatcher` + `EventContractGateway(dispatcher=...)` 的 `submit_order_async`。HTTP 交易默认仍处于禁用状态。
+- 完整调用说明和状态定义见 [docs/integration-api.md](docs/integration-api.md)。
+
 ## 真实下单默认关闭
 
 只有调用 `safe_orders.place_order_web()`，同时设置环境变量 `BINANCE_EVENT_LIVE_TRADING=I_ACCEPT_REAL_MONEY_RISK`，才能尝试下单。默认单笔上限 5 USDT；通过 `BINANCE_EVENT_MAX_ORDER_USDT` 配置。每次必须传入稳定且唯一的 `intent_id` 关键字参数。
