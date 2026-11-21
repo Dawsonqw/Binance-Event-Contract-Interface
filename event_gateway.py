@@ -58,9 +58,16 @@ class TradingInterface:
             order, signal_time_ms=signal_time_ms, max_age_ms=max_age_ms,
         )
 
-    def submit_order(self, order: OrderRequest):
+    def submit_order(self, order: OrderRequest, *, signal_time_ms=None, max_age_ms=1000):
+        """Default SDK submission is nonblocking; 202/QUEUED is not execution."""
+        return self.submit_order_async(
+            order, signal_time_ms=signal_time_ms, max_age_ms=max_age_ms,
+        )
+
+    def submit_order_sync_legacy(self, order: OrderRequest):
+        """Blocking compatibility path. Do not use in latency-sensitive strategies."""
         if not isinstance(order, OrderRequest):
-            raise TypeError("submit_order expects OrderRequest")
+            raise TypeError("submit_order_sync_legacy expects OrderRequest")
         # Existing safe_orders enforces the live-trading opt-in, UID, cap,
         # session freshness, durable intent and network timeouts.
         from os import environ, geteuid
