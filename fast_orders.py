@@ -38,6 +38,7 @@ FINAL_STATES = (
     "REJECTED_AUTH_BEFORE_SEND",
     "REJECTED_DISABLED_BEFORE_SEND",
     "REJECTED_OVERLOAD_BEFORE_SEND",
+    "REJECTED_INTERNAL_BEFORE_SEND",
     "ACKNOWLEDGED_NOT_SETTLEMENT_VERIFIED",
     "OUTCOME_UNKNOWN",
 )
@@ -318,6 +319,24 @@ class FastOrderDispatcher:
                     continue
                 try:
                     self._execute_one(intent_id, fields, deadline_ms, transport)
+                except Exception:
+                    # Keep the worker alive, but never resubmit a possibly
+                    # transmitted intent. Status transitions remain fail-closed.
+                    try:
+                        state = self.journal.get(intent_id)
+                        if state is not None and state["status"] == "DISPATCHING":
+                            self.journal.transition(
+                                intent_id, "DISPATCHING", "OUTCOME_UNKNOWN",
+                                "worker_internal_error_after_dispatch_started",
+                            )
+                        elif state is not None and state["status"] == "QUEUED":
+                            self.journal.transition(
+                                intent_id, "QUEUED", "REJECTED_INTERNAL_BEFORE_SEND",
+                                "worker_internal_error_before_dispatch",
+                            )
+                    except Exception:
+                        # The transaction log is still durable; no auto replay.
+                        pass
                 finally:
                     self.queue.task_done()
         finally:
@@ -386,6 +405,13 @@ class FastOrderDispatcher:
             stop.set()
         if worker is not None:
             worker.join(timeout=3)
+        # No queued orders are replayed after shutdown. Inflight responses
+        # are conservatively unknown if the worker did not finish.
+        if getattr(self, "journal", None) is not None:
+            try:
+                self.journal.recover_without_replaying()
+            except Exception:
+                pass
         if self._lock_fd is not None:
             fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
             os.close(self._lock_fd)
