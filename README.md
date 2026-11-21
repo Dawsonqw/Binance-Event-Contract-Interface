@@ -14,6 +14,14 @@
 
 登录凭证保存在 `~/.local/state/binance-event-contract/token.json` (0600)；Chromium profile 位于私有状态目录 (0700)。通过 `BINANCE_EVENT_STATE_DIR` 可更换状态目录，请确保其位于可信磁盘，且不要备份或上传凭证。
 
+## Token 有效期检查与交互式续期
+
+代码现在提供 **仅本地元数据** 检查：`python -m session_lifecycle status`。默认提前 24 小时预警；过期、有效期未知或剩余不足 15 分钟会在下单前被拒绝。正常存储的登录 Cookie 也可能提前被平台撤销，因此“本地未过期”不代表交易所确认有效。
+
+重新获取登录态请使用本人 Binance App 扫码确认，在非 root 交互式 SSH 终端执行 `python main.py --timeout 300`。它保留原有浏览器 Profile，但**不保证旧登录态能无人工自动刷新**；平台要求重新验证时必须重新扫码。不要使用 `--reset-browser-profile`，除非确实希望删除原有浏览器状态。
+
+完整方案见 [docs/session-renewal.md](docs/session-renewal.md)。可选的 systemd timer 模板位于 `deploy/`，默认**没有启用**，且只监控本地时间戳，不会续期、不连接交易所或发送通知。
+
 ## 真实下单默认关闭
 
 只有调用 `safe_orders.place_order_web()`，同时设置环境变量 `BINANCE_EVENT_LIVE_TRADING=I_ACCEPT_REAL_MONEY_RISK`，才能尝试下单。默认单笔上限 5 USDT；通过 `BINANCE_EVENT_MAX_ORDER_USDT` 配置。每次必须传入稳定且唯一的 `intent_id` 关键字参数。
